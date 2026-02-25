@@ -1,0 +1,236 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace Roblox_GodMode_Velocity_Ultra_V4_Final
+{
+    internal static class NativeKernel
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, [Out] byte[] lpBuffer, int dwSize, out IntPtr lpNumberOfBytesRead);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, int dwSize, out IntPtr lpNumberOfBytesWritten);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll")]
+        public static extern int VirtualQueryEx(IntPtr hProcess, IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, uint dwLength);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MEMORY_BASIC_INFORMATION
+        {
+            public IntPtr BaseAddress;
+            public IntPtr AllocationBase;
+            public uint AllocationProtect;
+            public IntPtr RegionSize;
+            public uint State;
+            public uint Protect;
+            public uint Type;
+        }
+
+        public const uint PROCESS_ALL_ACCESS = 0x001F0FFF;
+        public const uint MEM_COMMIT = 0x1000;
+        public const uint PAGE_READWRITE = 0x04;
+        public const uint PAGE_EXECUTE_READWRITE = 0x40;
+    }
+
+    internal class HyperVelocityEngine : IDisposable
+    {
+        private IntPtr _procHandle = IntPtr.Zero;
+        private readonly List<IntPtr> _cachedAddresses = new List<IntPtr>();
+        private bool _active = false;
+        private float _targetSpeed = 16.0f;
+        private CancellationTokenSource _cts;
+        private readonly byte[] _speedSignature = BitConverter.GetBytes(16.0f);
+
+        public float Velocity { get => _targetSpeed; set => _targetSpeed = value; }
+
+        public bool Attach()
+        {
+            var target = Process.GetProcessesByName("RobloxPlayerBeta").FirstOrDefault();
+            if (target == null) return false;
+            _procHandle = NativeKernel.OpenProcess(NativeKernel.PROCESS_ALL_ACCESS, false, target.Id);
+            return _procHandle != IntPtr.Zero;
+        }
+
+        public async Task AdvancedPatternScanAsync()
+        {
+            _cachedAddresses.Clear();
+            IntPtr searchPtr = IntPtr.Zero;
+            long maxAddr = 0x7FFFFFFFFFFFFFFF;
+
+            await Task.Run(() =>
+            {
+                while (NativeKernel.VirtualQueryEx(_procHandle, searchPtr, out var mbi, (uint)Marshal.SizeOf(typeof(NativeKernel.MEMORY_BASIC_INFORMATION))) != 0)
+                {
+                    bool isWritable = (mbi.Protect == NativeKernel.PAGE_READWRITE || mbi.Protect == NativeKernel.PAGE_EXECUTE_READWRITE);
+                    if (mbi.State == NativeKernel.MEM_COMMIT && isWritable)
+                    {
+                        byte[] buffer = new byte[(int)mbi.RegionSize];
+                        if (NativeKernel.ReadProcessMemory(_procHandle, mbi.BaseAddress, buffer, buffer.Length, out _))
+                        {
+                            for (int i = 0; i < buffer.Length - 4; i += 4)
+                            {
+                                if (buffer[i] == _speedSignature[0] && buffer[i + 1] == _speedSignature[1] &&
+                                    buffer[i + 2] == _speedSignature[2] && buffer[i + 3] == _speedSignature[3])
+                                {
+                                    _cachedAddresses.Add(IntPtr.Add(mbi.BaseAddress, i));
+                                }
+                            }
+                        }
+                    }
+                    searchPtr = IntPtr.Add(mbi.BaseAddress, (int)mbi.RegionSize);
+                    if ((long)searchPtr >= maxAddr) break;
+                }
+            });
+        }
+
+        public void CommitInjectionStream()
+        {
+            _active = true;
+            _cts = new CancellationTokenSource();
+            
+            Task.Run(() =>
+            {
+                while (!_cts.Token.IsCancellationRequested)
+                {
+                    byte[] rawValue = BitConverter.GetBytes(_targetSpeed);
+                    lock (_cachedAddresses)
+                    {
+                        foreach (var addr in _cachedAddresses)
+                        {
+                            NativeKernel.WriteProcessMemory(_procHandle, addr, rawValue, rawValue.Length, out _);
+                        }
+                    }
+                    Thread.Sleep(1); 
+                }
+            }, _cts.Token);
+        }
+
+        public void Dispose()
+        {
+            _active = false;
+            _cts?.Cancel();
+            if (_procHandle != IntPtr.Zero)
+            {
+                NativeKernel.CloseHandle(_procHandle);
+                _procHandle = IntPtr.Zero;
+            }
+        }
+    }
+
+    public class MainController : Form
+    {
+        private readonly HyperVelocityEngine _coreEngine = new HyperVelocityEngine();
+        private TrackBar _slider;
+        private Label _statusLabel;
+        private Button _initBtn;
+        private GroupBox _ctrlGroup;
+
+        public MainController()
+        {
+            SetupComponent();
+        }
+
+        private void SetupComponent()
+        {
+            this.Text = "CORE_VELOCITY_V4_ULTRA";
+            this.Size = new Size(450, 300);
+            this.BackColor = Color.FromArgb(15, 15, 15);
+            this.ForeColor = Color.Cyan;
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            this.MaximizeBox = false;
+            this.TopMost = true;
+
+            _initBtn = new Button
+            {
+                Text = "INITIALIZE ENGINE SCAN",
+                Size = new Size(410, 60),
+                Location = new Point(10, 10),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Consolas", 10, FontStyle.Bold),
+                BackColor = Color.FromArgb(30, 30, 30)
+            };
+            _initBtn.Click += async (s, e) =>
+            {
+                _initBtn.Enabled = false;
+                _initBtn.Text = "ATTACHING TO RBX...";
+                if (_coreEngine.Attach())
+                {
+                    _initBtn.Text = "SCANNING VIRTUAL PAGES...";
+                    await _coreEngine.AdvancedPatternScanAsync();
+                    _coreEngine.CommitInjectionStream();
+                    _initBtn.Text = "SYSTEM ACTIVE - PULSE OK";
+                    _initBtn.ForeColor = Color.Lime;
+                    _ctrlGroup.Enabled = true;
+                }
+                else
+                {
+                    _initBtn.Text = "PROCESS NOT FOUND";
+                    _initBtn.Enabled = true;
+                    _initBtn.ForeColor = Color.Red;
+                }
+            };
+
+            _ctrlGroup = new GroupBox
+            {
+                Text = " VELOCITY CONTROL ",
+                Size = new Size(410, 150),
+                Location = new Point(10, 80),
+                Enabled = false,
+                ForeColor = Color.White
+            };
+
+            _slider = new TrackBar
+            {
+                Minimum = 10,
+                Maximum = 10000,
+                Value = 16,
+                TickFrequency = 500,
+                Size = new Size(390, 45),
+                Location = new Point(10, 30)
+            };
+            _slider.ValueChanged += (s, e) =>
+            {
+                _coreEngine.Velocity = (float)_slider.Value;
+                _statusLabel.Text = $"TARGET_SPEED: {_slider.Value} units/sec";
+            };
+
+            _statusLabel = new Label
+            {
+                Text = "TARGET_SPEED: 16 units/sec",
+                Size = new Size(390, 40),
+                Location = new Point(10, 90),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Consolas", 12, FontStyle.Italic)
+            };
+
+            _ctrlGroup.Controls.Add(_slider);
+            _ctrlGroup.Controls.Add(_statusLabel);
+
+            this.Controls.Add(_initBtn);
+            this.Controls.Add(_ctrlGroup);
+
+            this.FormClosing += (s, e) => _coreEngine.Dispose();
+        }
+
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainController());
+        }
+    }
+}
